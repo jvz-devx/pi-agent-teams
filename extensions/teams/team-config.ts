@@ -4,6 +4,7 @@ import { withLock } from "./fs-lock.js";
 import { sanitizeName } from "./names.js";
 import type { TeamsStyle } from "./teams-style.js";
 import { normalizeTeamsStyleId } from "./teams-style.js";
+import { coerceWorkerToolsPolicy } from "./worker-tool-policy.js";
 
 export interface TeamMember {
 	name: string;
@@ -28,6 +29,12 @@ export interface TeamHooksPolicy {
 	followupOwner?: TeamHooksFollowupOwnerPolicy;
 }
 
+export interface WorkerToolsPolicy {
+	extraTools?: string[];
+	extraExtensions?: string[];
+	inheritSafeExtensions?: boolean;
+}
+
 export interface TeamConfig {
 	version: 1;
 	teamId: string;
@@ -39,6 +46,8 @@ export interface TeamConfig {
 	style?: TeamsStyle;
 	/** Optional per-team hooks policy override (env remains fallback). */
 	hooks?: TeamHooksPolicy;
+	/** Optional per-team worker tool/extension allowlist policy. */
+	workerTools?: WorkerToolsPolicy;
 	createdAt: string;
 	updatedAt: string;
 	members: TeamMember[];
@@ -130,6 +139,7 @@ function coerceConfig(obj: unknown): TeamConfig | null {
 
 	const style = coerceStyle(obj.style);
 	const hooks = coerceHooksPolicy(obj.hooks);
+	const workerTools = coerceWorkerToolsPolicy(obj.workerTools);
 	const members = obj.members.map(coerceMember).filter((m): m is TeamMember => m !== null);
 	return {
 		version: 1,
@@ -138,6 +148,7 @@ function coerceConfig(obj: unknown): TeamConfig | null {
 		leadName: sanitizeName(obj.leadName),
 		style,
 		hooks,
+		workerTools,
 		createdAt: obj.createdAt,
 		updatedAt: obj.updatedAt,
 		members,
@@ -235,6 +246,31 @@ export async function updateTeamHooksPolicy(
 			return updated;
 		},
 		{ label: "team-config:hooks-policy" },
+	);
+}
+
+export async function updateWorkerToolsPolicy(
+	teamDir: string,
+	updater: (current: WorkerToolsPolicy) => WorkerToolsPolicy | undefined,
+): Promise<TeamConfig | null> {
+	const file = getTeamConfigPath(teamDir);
+	const lock = `${file}.lock`;
+
+	await ensureDir(teamDir);
+
+	return await withLock(
+		lock,
+		async () => {
+			const existing = coerceConfig(await readJson(file));
+			if (!existing) return null;
+
+			const nextWorkerTools = coerceWorkerToolsPolicy(updater(existing.workerTools ?? {}));
+			const now = new Date().toISOString();
+			const updated: TeamConfig = { ...existing, workerTools: nextWorkerTools, updatedAt: now };
+			await writeJsonAtomic(file, updated);
+			return updated;
+		},
+		{ label: "team-config:worker-tools-policy" },
 	);
 }
 

@@ -75,8 +75,10 @@ import {
 import { DelegationTracker, pollLeaderInbox } from "../extensions/teams/leader-inbox.js";
 import { planDelegateTeammateNames, registerTeamsTool } from "../extensions/teams/leader-teams-tool.js";
 import { sendPromptOrFollowUp } from "../extensions/teams/leader-messaging-commands.js";
+import { handleTeamEnvCommand } from "../extensions/teams/leader-info-commands.js";
 import { runWorker } from "../extensions/teams/worker.js";
 import { buildWorkerToolAllowlist, WORKER_READ_ONLY_PLAN_TOOLS, withWorkerCommunicationTools } from "../extensions/teams/worker-tools.js";
+import { appendWorkerPolicyTools, buildWorkerExtensionArgs, coerceWorkerToolsPolicy, isValidWorkerToolName } from "../extensions/teams/worker-tool-policy.js";
 import { TeammateRpc, type TeammateHandle } from "../extensions/teams/teammate-rpc.js";
 import { TeammateTmux } from "../extensions/teams/teammate-tmux.js";
 import { spawnWorkerPane, type TmuxContext, type TmuxExecutor } from "../extensions/teams/tmux-layout.js";
@@ -1817,6 +1819,105 @@ console.log("\n15. worker/leader messaging hardening");
 		["read", "grep", "find", "ls", "message_lead", "team_message"],
 		"plan-required read-only tool set includes communication tools",
 	);
+
+	assert(isValidWorkerToolName("codex_generate_image"), "worker tool names allow normal extension tool identifiers");
+	assert(!isValidWorkerToolName("safe,teams"), "worker tool names reject comma injection");
+	assert(!isValidWorkerToolName("safe teams"), "worker tool names reject whitespace");
+	assert(!isValidWorkerToolName("safe\nteams"), "worker tool names reject control characters");
+	assertEq(
+		coerceWorkerToolsPolicy({
+			extraTools: ["codex_generate_image", "safe,teams", "safe teams", "safe\nteams", "teams"],
+			extraExtensions: ["pi-codex-image-gen"],
+			inheritSafeExtensions: false,
+		})?.extraTools,
+		["codex_generate_image", "teams"],
+		"worker tool config coercion drops invalid tool names before later hard-block filtering",
+	);
+
+	const policyApplied = appendWorkerPolicyTools(
+		buildWorkerToolAllowlist(["read", "bash", "edit", "write", "grep", "find", "ls"]),
+		{
+			extraTools: ["codex_generate_image", "teams", "Agent", "safe,teams", "safe teams", "safe\nteams", "codex_generate_image"],
+			extraExtensions: ["pi-codex-image-gen", "pi-codex-image-gen"],
+			inheritSafeExtensions: false,
+		},
+	);
+	assertEq(
+		policyApplied.tools,
+		["read", "bash", "edit", "write", "grep", "find", "ls", "message_lead", "team_message", "codex_generate_image"],
+		"worker tool policy appends allowed extra tools to base spawn allowlist",
+	);
+	assertEq(policyApplied.blockedTools, ["teams", "Agent"], "worker tool policy filters hard-blocked recursive tools");
+	assert(!policyApplied.tools.includes("safe,teams"), "worker tool policy never emits comma-injected tool names into --tools CSV");
+
+	const extraExtensionEntry = path.join(tmpRoot, "fake-extra-extension.ts");
+	fs.writeFileSync(extraExtensionEntry, "export function activate() {}\n", "utf8");
+	const extensionArgsDefault = buildWorkerExtensionArgs({
+		teamsEntry: "/tmp/pi-teams-entry.ts",
+		policy: { extraTools: [], extraExtensions: [], inheritSafeExtensions: false },
+		cwd: tmpRoot,
+	});
+	assertEq(
+		extensionArgsDefault.args,
+		["--no-extensions", "-e", "/tmp/pi-teams-entry.ts"],
+		"default worker extension args preserve isolated teams-only loading",
+	);
+	const extensionArgsWithExtra = buildWorkerExtensionArgs({
+		teamsEntry: "/tmp/pi-teams-entry.ts",
+		policy: { extraTools: ["codex_generate_image"], extraExtensions: [extraExtensionEntry], inheritSafeExtensions: false },
+		cwd: tmpRoot,
+	});
+	assertEq(
+		extensionArgsWithExtra.args,
+		["--no-extensions", "-e", "/tmp/pi-teams-entry.ts", "-e", extraExtensionEntry],
+		"worker extension args include extra extension while preserving --no-extensions isolation",
+	);
+	const extensionArgsMissingTeamsEntry = buildWorkerExtensionArgs({
+		teamsEntry: null,
+		policy: { extraTools: ["codex_generate_image"], extraExtensions: [extraExtensionEntry], inheritSafeExtensions: false },
+		cwd: tmpRoot,
+	});
+	assertEq(
+		extensionArgsMissingTeamsEntry.args,
+		["-e", extraExtensionEntry],
+		"missing teams entry fallback avoids --no-extensions so teams extension can still load via normal discovery",
+	);
+	assert(extensionArgsMissingTeamsEntry.warnings.some((w) => w.includes("teams extension")), "missing teams entry fallback warns");
+
+	const extensionArgsInherit = buildWorkerExtensionArgs({
+		teamsEntry: "/tmp/pi-teams-entry.ts",
+		policy: { extraTools: ["codex_generate_image"], extraExtensions: [extraExtensionEntry], inheritSafeExtensions: true },
+		cwd: tmpRoot,
+	});
+	assertEq(extensionArgsInherit.args, ["-e", "/tmp/pi-teams-entry.ts", "-e", extraExtensionEntry], "inherit-safe omits --no-extensions while retaining explicit extension entries");
+
+	const envNotifications: string[] = [];
+	await handleTeamEnvCommand({
+		ctx: {
+			cwd: tmpRoot,
+			ui: {
+				notify(message: string) {
+					envNotifications.push(message);
+				},
+			},
+		} as unknown as Parameters<typeof handleTeamEnvCommand>[0]["ctx"],
+		rest: ["painter"],
+		teamId: "env-team",
+		taskListId: null,
+		leadName: "team-lead",
+		style: "normal",
+		getTeamsExtensionEntryPath: () => "/tmp/pi-teams-entry.ts",
+		shellQuote: (v: string) => `'${v}'`,
+		workerTools: { extraTools: ["codex_generate_image"], extraExtensions: [extraExtensionEntry], inheritSafeExtensions: false },
+		activeTools: ["read", "grep", "find", "ls"],
+	});
+	const envMessage = envNotifications.join("\n");
+	assert(envMessage.includes("--tools"), "/team env output includes worker --tools allowlist");
+	assert(envMessage.includes("read,grep,find,ls,message_lead,team_message,codex_generate_image"), "/team env output uses same active-tool base policy as spawn");
+	assert(!envMessage.includes("bash"), "/team env output does not grant inactive built-in tools");
+	assert(envMessage.includes("codex_generate_image"), "/team env output includes configured extra worker tool");
+	assert(envMessage.includes("--no-extensions") && envMessage.includes("/tmp/pi-teams-entry.ts"), "/team env output includes worker extension loading policy");
+	assert(envMessage.includes(extraExtensionEntry), "/team env output includes configured extra extension entry");
 
 	const planned = planDelegateTeammateNames({
 		inputTasks: [

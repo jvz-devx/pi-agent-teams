@@ -41,6 +41,8 @@ import { getParentSessionId, shouldSilenceInheritedParentAttachClaimWarning } fr
 import { branchSelectionNote, ensureSessionFileMaterialized, resolveBranchLeafSelection } from "./session-branching.js";
 import type { ContextMode, SpawnTeammateFn, SpawnTeammateResult, WorkspaceMode } from "./spawn-types.js";
 import { buildWorkerToolAllowlist } from "./worker-tools.js";
+import { appendWorkerPolicyTools, buildWorkerExtensionArgs } from "./worker-tool-policy.js";
+import { handleTeamToolsCommand } from "./leader-worker-tools-command.js";
 
 function getTeamsExtensionEntryPath(): string | null {
 	// In dev, teammates won't automatically have this extension unless it is installed or discoverable.
@@ -624,7 +626,10 @@ export function runLeader(pi: ExtensionAPI): void {
 			void setMemberStatus(teamDir, name, "offline", { meta: { exitCode: code ?? undefined } });
 		});
 
-		const tools = buildWorkerToolAllowlist(pi.getActiveTools?.());
+		const workerToolPolicy = (await loadTeamConfig(teamDir))?.workerTools ?? teamConfig?.workerTools;
+		const baseTools = buildWorkerToolAllowlist(pi.getActiveTools?.());
+		const { tools, blockedTools } = appendWorkerPolicyTools(baseTools, workerToolPolicy);
+		if (blockedTools.length > 0) warnings.push(`Ignored hard-blocked worker tool(s): ${blockedTools.join(", ")}`);
 		const argsForChild: string[] = [];
 		if (sessionFile) argsForChild.push("--session", sessionFile);
 		argsForChild.push("--session-dir", teamSessionsDir);
@@ -638,9 +643,9 @@ export function runLeader(pi: ExtensionAPI): void {
 		argsForChild.push("--thinking", thinkingLevel);
 
 		const teamsEntry = getTeamsExtensionEntryPath();
-		if (teamsEntry) {
-			argsForChild.push("--no-extensions", "-e", teamsEntry);
-		}
+		const extensionArgs = buildWorkerExtensionArgs({ teamsEntry, policy: workerToolPolicy, cwd: ctx.cwd });
+		argsForChild.push(...extensionArgs.args);
+		warnings.push(...extensionArgs.warnings);
 
 		const strings = getTeamsStrings(style);
 		const leaderTitle = strings.leaderTitle.toLowerCase();
@@ -721,6 +726,8 @@ export function runLeader(pi: ExtensionAPI): void {
 				spawnBackend: tmuxContext ? "tmux" : "rpc",
 				sessionName,
 				thinkingLevel,
+				workerTools: tools,
+				workerExtensionArgs: extensionArgs.args,
 				...(tmuxContext
 					? {
 						tmuxSession: tmuxContext.sessionName,
@@ -1120,6 +1127,22 @@ export function runLeader(pi: ExtensionAPI): void {
 		},
 	});
 
+	pi.registerCommand("team-tools", {
+		description: "Teams: configure worker tool allowlist for new teammates",
+		handler: async (args, ctx) => {
+			currentCtx = ctx;
+			if (!currentTeamId) currentTeamId = ctx.sessionManager.getSessionId();
+			await handleTeamToolsCommand({
+				ctx,
+				args,
+				teamId: currentTeamId,
+				getTeamConfig: () => teamConfig,
+				refreshTasks,
+			});
+			renderWidget();
+		},
+	});
+
 	pi.registerCommand("team", {
 		description: "Teams: spawn comrades + coordinate via Claude-like task list",
 		handler: async (args, ctx) => {
@@ -1161,6 +1184,7 @@ export function runLeader(pi: ExtensionAPI): void {
 				openWidget,
 				getTeamsExtensionEntryPath,
 				shellQuote,
+				getActiveTools: () => pi.getActiveTools?.(),
 				getCurrentCtx: () => currentCtx,
 				stopAllTeammates,
 			});

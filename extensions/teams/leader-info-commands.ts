@@ -2,12 +2,14 @@ import type { ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { sanitizeName } from "./names.js";
 import { getTeamDir, getTeamsRootDir } from "./paths.js";
 import type { TeammateHandle } from "./teammate-rpc.js";
-import type { TeamConfig, TeamMember } from "./team-config.js";
+import type { TeamConfig, TeamMember, WorkerToolsPolicy } from "./team-config.js";
 import type { TeamsStyle } from "./teams-style.js";
 import { formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
 import { resolveDisplayStatus, formatElapsed, formatUsageBreakdown, getVisibleWorkerNames, lastMessageSummary, toolActivity } from "./teams-ui-shared.js";
 import type { ActivityTracker } from "./activity-tracker.js";
 import { listTasks } from "./task-store.js";
+import { buildWorkerToolAllowlist } from "./worker-tools.js";
+import { appendWorkerPolicyTools, buildWorkerExtensionArgs } from "./worker-tool-policy.js";
 
 export async function handleTeamListCommand(opts: {
 	ctx: ExtensionCommandContext;
@@ -93,8 +95,10 @@ export async function handleTeamEnvCommand(opts: {
 	style: TeamsStyle;
 	getTeamsExtensionEntryPath: () => string | null;
 	shellQuote: (v: string) => string;
+	workerTools?: WorkerToolsPolicy;
+	activeTools?: readonly string[] | null;
 }): Promise<void> {
-	const { ctx, rest, teamId, taskListId, leadName, style, getTeamsExtensionEntryPath, shellQuote } = opts;
+	const { ctx, rest, teamId, taskListId, leadName, style, getTeamsExtensionEntryPath, shellQuote, workerTools, activeTools } = opts;
 
 	const nameRaw = rest[0];
 	if (!nameRaw) {
@@ -109,7 +113,13 @@ export async function handleTeamEnvCommand(opts: {
 	const autoClaim = (process.env.PI_TEAMS_DEFAULT_AUTO_CLAIM ?? "1") === "1" ? "1" : "0";
 
 	const teamsEntry = getTeamsExtensionEntryPath();
-	const piCmd = teamsEntry ? `pi --no-extensions -e ${shellQuote(teamsEntry)}` : "pi";
+	const { tools, blockedTools } = appendWorkerPolicyTools(buildWorkerToolAllowlist(activeTools), workerTools);
+	const extensionArgs = buildWorkerExtensionArgs({ teamsEntry, policy: workerTools, cwd: ctx.cwd });
+	const piArgs = [
+		...(tools.length ? ["--tools", tools.join(",")] : []),
+		...extensionArgs.args,
+	];
+	const piCmd = ["pi", ...piArgs.map(shellQuote)].join(" ");
 
 	const env: Record<string, string> = {
 		PI_TEAMS_ROOT_DIR: teamsRoot,
@@ -142,6 +152,8 @@ export async function handleTeamEnvCommand(opts: {
 			"Env (copy/paste):",
 			exportLines,
 			"",
+			...(blockedTools.length ? ["", `Warning: hard-blocked worker tools ignored: ${blockedTools.join(",")}`] : []),
+			...(extensionArgs.warnings.length ? ["", ...extensionArgs.warnings.map((w) => `Warning: ${w}`)] : []),
 			"Run:",
 			oneLiner,
 		].join("\n"),

@@ -38,6 +38,7 @@ const TEAM_HELP_TEXT = [
 	"Usage:",
 	"  /team id",
 	"  /team env <name>",
+	"  /team-tools list|add|remove|clear|blocked|inherit-safe  # configure worker tools for new teammates",
 	"  /team attach list",
 	"  /team attach <teamId> [--claim]",
 	"  /team detach",
@@ -103,6 +104,7 @@ export async function handleTeamCommand(opts: {
 	openWidget: (ctx: ExtensionCommandContext) => Promise<void>;
 	getTeamsExtensionEntryPath: () => string | null;
 	shellQuote: (v: string) => string;
+	getActiveTools: () => readonly string[] | null | undefined;
 	getCurrentCtx: () => ExtensionContext | null;
 	stopAllTeammates: (ctx: ExtensionContext, reason: string) => Promise<void>;
 }): Promise<void> {
@@ -130,6 +132,7 @@ export async function handleTeamCommand(opts: {
 		openWidget,
 		getTeamsExtensionEntryPath,
 		shellQuote,
+		getActiveTools,
 		getCurrentCtx,
 		stopAllTeammates,
 	} = opts;
@@ -180,6 +183,8 @@ export async function handleTeamCommand(opts: {
 				style,
 				getTeamsExtensionEntryPath,
 				shellQuote,
+				workerTools: getTeamConfig()?.workerTools,
+				activeTools: getActiveTools() ?? null,
 			});
 		},
 

@@ -169,7 +169,15 @@ Worktrees and branches are automatically cleaned up on session shutdown and sess
 ```
 /team id       # show team ID, task list ID, paths
 /team env <n>  # print env vars for manually spawning a teammate named <n>
+/team-tools list
+/team-tools add <toolName> [--extension <extensionSpec>]  # opt-in extra worker tool for future spawns
+/team-tools remove <toolName>
+/team-tools clear
+/team-tools blocked
+/team-tools inherit-safe on|off
 ```
+
+Worker tools default to the safe base allowlist plus `message_lead`/`team_message`. Extra tools are leader-controlled; recursive/control tools (`teams`, `Agent`, `get_subagent_result`, `steer_subagent`) remain hard-blocked. `inherit-safe on` disables the default `--no-extensions` isolation for future workers while retaining the explicit tool allowlist.
 
 ## Shared task list across sessions
 

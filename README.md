@@ -98,6 +98,7 @@ Or drive it manually:
 ```
 /team spawn alice                          # spawn a teammate (fresh session, shared workspace)
 /team spawn bob branch worktree            # spawn with leader context + isolated worktree
+/team-tools add codex_generate_image --extension pi-codex-image-gen  # opt-in extra worker tool for future spawns
 
 /team attach list                          # discover existing teams under ~/.pi/agent/teams
 /team attach <teamId> [--claim]            # attach this session to an existing team workspace (force takeover with --claim)
@@ -239,6 +240,20 @@ All management commands live under `/team`.
 | `/team gc [--dry-run] [--force] [--max-age-hours=N]` | Garbage-collect stale team dirs older than N hours (default: 24) |
 | `/team id` | Print team/task-list IDs and paths |
 | `/team env <name>` | Print env vars to start a manual teammate |
+| `/team-tools list` | Show extra worker tool/extension policy for new teammates |
+| `/team-tools add <toolName> [--extension <extensionSpec>]` | Allow one extra worker tool and optionally load the extension that registers it |
+| `/team-tools remove <toolName>` | Remove an extra worker tool (extensions remain until `clear`) |
+| `/team-tools clear` | Clear all extra worker tools/extensions |
+| `/team-tools blocked` | Show hard-blocked recursive/control tools |
+| `/team-tools inherit-safe on\|off` | When on, use normal extension discovery plus explicit extension entries; default off keeps `--no-extensions` isolation |
+
+Worker tool safety note:
+
+- New workers default to `read,bash,edit,write,grep,find,ls,message_lead,team_message`.
+- Extra tools are leader-controlled and opt-in via `/team-tools`.
+- Recursive/control tools are always blocked even if config is edited manually: `teams`, `Agent`, `get_subagent_result`, `steer_subagent`.
+- Adding a tool to `--tools` is not enough; pass `--extension` when the tool comes from an extension package/path.
+- Existing workers must be restarted to pick up changes. `/team env <name>` prints a manual worker command with the same policy.
 
 Model inheritance note:
 
@@ -314,11 +329,23 @@ The `member_status` tool action provides the same information programmatically f
 | `PI_TEAMS_HOOKS_CREATE_TASK_ON_FAILURE` | Legacy shortcut for `PI_TEAMS_HOOKS_FAILURE_ACTION=followup` | `0` (off) |
 | `PI_TEAMS_STALL_THRESHOLD_MS` | Threshold (ms) before a streaming worker with no events is flagged as "stalled" | `300000` (5 min) |
 
+Team-level worker tool policy is stored in `<teamDir>/config.json`:
+
+```json
+{
+  "workerTools": {
+    "extraTools": ["codex_generate_image"],
+    "extraExtensions": ["pi-codex-image-gen"],
+    "inheritSafeExtensions": false
+  }
+}
+```
+
 ## Storage layout
 
 ```
 <teamsRoot>/<teamId>/
-  config.json                          # team metadata + members
+  config.json                          # team metadata + members + workerTools policy
   tasks/<taskListId>/
     1.json, 2.json, ...                # one file per task
     .highwatermark                      # next task ID
